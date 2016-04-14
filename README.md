@@ -1,7 +1,3 @@
 # rogalik
 
-Taking this opportunity to test if I can use vi and console git.
-
-Testing git diff.
-
-Roguelike created basing on RogueBasin's Complete Roguelike Tutorial.
+Roguelike created basing on RogueBasin's Complete Roguelike Tutorial until I got bored and started expanding on keyboard interface and fireballs.
