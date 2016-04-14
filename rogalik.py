@@ -38,6 +38,8 @@ LIMIT_FPS = 20
 #Item specs
 LIGHTNING_DAMAGE = 20
 LIGHTNING_RANGE = 5
+CONFUSE_NUM_TURNS = 5
+CONFUSE_RANGE = 8
 
 class Object:
 	global fov_map
@@ -188,7 +190,10 @@ class Item:
 ##############
 # AI CLASSES #
 ##############
+#Each of those must have a take_turn method.
+
 class BasicMelee:
+	'''AI for a generic monster that approaches the player and attacks them.'''
 	def take_turn(self):
 		#turn of a basic monster. they run on ostrich logic, see player only if player sees them
 		monster = self.owner
@@ -197,6 +202,20 @@ class BasicMelee:
 				monster.move_towards(player.x, player.y)
 			elif player.fighter.hp > 0:
 				monster.fighter.attack(player)
+
+class Confused:
+	'''AI for a confused monster. Moves in a random direction and lasts a set number of turns.'''
+	def __init__(self, old_ai, num_turns = CONFUSE_NUM_TURNS):
+		self.old_ai = old_ai
+		self.num_turns = num_turns
+	
+	def take_turn(self):
+		if self.num_turns > 0:
+			self.owner.move(libtcod.random_get_int(0, -1, 1), libtcod.random_get_int(0, -1, 1))
+			self.num_turns -= 1
+		else:
+			self.owner.ai = self.old_ai
+			message('The {0} is no longer confused!'.format(self.owner.name), libtcod.red)
 
 ################
 # MAP HANDLING #
@@ -260,9 +279,14 @@ def place_objects(room):
 		if not is_blocked(x, y):
 			dice = libtcod.random_get_int(0, 0, 100)
 			if dice < 70:
+				#potion
 				item = Object(x, y, "!", "healing potion", libtcod.flame, item=Item(cast_heal))
+			elif dice < 70+15:
+				#scroll of lightning bolt
+				item = Object(x, y, "?", "scroll of lightning bolt", libtcod.light_yellow, item=Item(cast_lightning))
 			else:
-				item = Object(x, y, "?", "scroll of lightning bolt", libtcod.light_grey, item=Item(cast_lightning))
+				#scroll of confuse monster
+				item = Object(x, y, "?", "scroll of confuse monster", libtcod.violet, item=Item(cast_confuse))
 			objects.append(item)
 			item.send_to_back()
 		
@@ -595,8 +619,20 @@ def cast_lightning():
 		message("A lightning bolt strikes the {0} with a loud thunder for {1} damage!".format(target.name, LIGHTNING_DAMAGE))
 		target.fighter.take_damage(LIGHTNING_DAMAGE)
 		
+def cast_confuse():
+	#find closest enemy and confuse it
+	monster = closest_monster(CONFUSE_RANGE)
+	if monster is None:
+		message('No enemy within range to confuse.', libtcod.red)
+		return 'cancelled'
+	else:
+		old_ai = monster.ai
+		monster.ai = Confused(old_ai)
+		monster.ai.owner = monster
+		message("The {0}'s eyes unfocus and glaze over...".format(monster.name), libtcod.light_green)
+		
 def closest_monster(max_range):
-	#find closest enemy up to a range in FOV
+	'''Finds the closest visible enemy up to a maximum range'''
 	closest_enemy = None
 	closest_dist = max_range + 1
 	for object in objects: #can be later changed to exclude friendly NPCs, if any
@@ -611,7 +647,7 @@ def closest_monster(max_range):
 # INITIALIZATION #
 ##################
 		
-libtcod.console_set_custom_font('celtic_garamond_10x10_gs_tc.png', libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_TCOD)
+libtcod.console_set_custom_font('resource/celtic_garamond_10x10_gs_tc.png', libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_TCOD)
 libtcod.console_init_root(SCREEN_WIDTH, SCREEN_HEIGHT, 'Testowy Rogalik', False)
 libtcod.sys_set_fps(LIMIT_FPS)
 con = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
