@@ -2,10 +2,25 @@ import libtcodpy as libtcod
 from math import sqrt
 import textwrap
 
+DIRECTIONS = {
+	libtcod.KEY_UP:		(0, -1),
+	libtcod.KEY_DOWN:	(0, 1),
+	libtcod.KEY_LEFT:	(-1, 0),
+	libtcod.KEY_RIGHT:	(1, 0),
+	libtcod.KEY_KP1:	(-1, 1),
+	libtcod.KEY_KP2:	(0, 1),
+	libtcod.KEY_KP3:	(1, 1),
+	libtcod.KEY_KP4:	(-1, 0),
+	libtcod.KEY_KP6:	(1, 0),
+	libtcod.KEY_KP7:	(-1, -1),
+	libtcod.KEY_KP8:	(0, -1),
+	libtcod.KEY_KP9:	(1, -1)
+	}
+
 #window size
 SCREEN_WIDTH = 80
 SCREEN_HEIGHT = 50
-DEBUG_ON = True
+DEBUG_ON = False
 
 color_dark_wall = libtcod.Color(50,50,50)
 color_lit_wall = libtcod.Color(110,110,110)
@@ -40,14 +55,18 @@ LIGHTNING_DAMAGE = 20
 LIGHTNING_RANGE = 5
 CONFUSE_NUM_TURNS = 5
 CONFUSE_RANGE = 8
+FIREBALL_DAMAGE = 12
+FIREBALL_RADIUS = 3
+FIREBALL_RANGE = 5
 
 class Object:
+	'''a generic object: player/monster/item/stairs/whatever. always represented by a character.'''
+
 	global fov_map
-	#a generic object: player/monster/item/stairs/whatever.
-	#always represented by a character.
-	def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None, item=None):
+	def __init__(self, x, y, char='@', name='OBJECT', color=libtcod.red, blocks=False, fighter=None, ai=None, item=None, interact=None):
 		self.x = x
 		self.y = y
+		self.pos = (self.x, self.y)
 		self.char = char
 		self.name = name
 		self.color = color
@@ -63,12 +82,23 @@ class Object:
 		if self.item:
 			self.item.owner = self
 		
-	def move(self, dx, dy):
-		#move by a given amount
-		if not is_blocked(self.x+dx, self.y+dy):
-			self.x += dx
-			self.y += dy
-	
+	def move(self, dx, dy, ghost = False, leash = 0):
+		#move by a given amount. returns a bool for messages and checks
+		nx = self.x+dx
+		ny = self.y+dy
+		
+		if leash > 0 and distance(player.x, player.y, nx, ny) > leash - 1:
+			return False
+		
+		if nx < MAP_WIDTH and ny < MAP_HEIGHT and nx >= 0 and ny >= 0:
+			if not is_blocked(nx, ny) or ghost:
+				self.x = nx
+				self.y = ny
+				self.pos = (self.x, self.y)
+				return True
+		
+		return False
+
 	def distance_to(self, other):
 		dx = other.x - self.x
 		dy = other.y - self.y
@@ -89,7 +119,7 @@ class Object:
 			self.known = True
 		if self.known:
 			libtcod.console_set_default_foreground(con, self.color)
-			libtcod.console_put_char(con, self.x, self.y, self.char, libtcod.BKGND_NONE)
+			libtcod.console_put_char(con, self.x, self.y, self.char, libtcod.BKGND_SET)
 	
 	def send_to_back(self):
 		#make this object drawn first, so it's covered by any other object
@@ -99,16 +129,17 @@ class Object:
 	
 	def clear(self):
 		if self.known:
-			libtcod.console_put_char(con, self.x, self.y, ".", libtcod.BKGND_NONE)
+			libtcod.console_put_char(con, self.x, self.y, map[self.x][self.y].symbol, libtcod.BKGND_NONE)
+		
 
 #####################
 # OBJECT SUBCLASSES #
 #####################
-			
+
 class Fighter:
 	#this is a widget with all the functionality for fighting.
 	#it includes stats (see init), functions for taking damage and attacking.
-	#dying and possibly skills will be delegated to outside functions.
+	#dying and possibly skills will be relegated to outside functions.
 
 	def __init__(self, hp, defence, power, death_function = None):
 		#all ints except death_function, which is a function
@@ -166,8 +197,6 @@ def monster_death(monster):
 	monster.name = 'remains of ' + monster.name
 	monster.send_to_back()
 	
-
-
 class Item:
 	def __init__(self, use_function=None):
 		self.use_function = use_function
@@ -186,7 +215,17 @@ class Item:
 		else:
 			if self.use_function() != 'no-use':
 				inventory.remove(self.owner)
-	
+				
+class Interact:
+	#A subtype for implementing usable objects, such as doors or NPCs. If use_command is None, it activates when the player moves into it.
+	#TODO: some actual NPCs that take advantage of this; doors were eventually implemented in a different way
+	def __init__(self, use_command=None, use_action=None):
+		self.use_command = use_command
+		self.use_action = use_action
+		
+	def activate(self):
+		self.use_action
+
 ##############
 # AI CLASSES #
 ##############
@@ -211,7 +250,9 @@ class Confused:
 	
 	def take_turn(self):
 		if self.num_turns > 0:
-			self.owner.move(libtcod.random_get_int(0, -1, 1), libtcod.random_get_int(0, -1, 1))
+			#print a message if move fails
+			if not self.owner.move(libtcod.random_get_int(0, -1, 1), libtcod.random_get_int(0, -1, 1)):
+				message('The {0} stumbles in its confusion!'.format(self.owner.name), libtcod.light_grey)
 			self.num_turns -= 1
 		else:
 			self.owner.ai = self.old_ai
@@ -223,11 +264,33 @@ class Confused:
 class Tile:
 	#a tile of the map and its properties
 	
-	def __init__(self, blocked, block_sight = None):
+	def __init__(self, blocked, block_sight = None, symbol = '&', usable=None):
+		#the default state is just a normal wall.
 		self.blocked = blocked
 		if block_sight == None: block_sight = blocked
 		self.block_sight = block_sight
 		self.explored = False
+		self.symbol = symbol
+		self.usable = usable
+		if self.usable:
+			self.usable.owner = self
+
+class Usable:
+	def __init__(self, use_function):
+		self.use_function = use_function
+		
+	def activate(self):
+		self.use_function(self.owner)
+		
+def open_door(door):
+	#a creak for flavour
+	if libtcod.random_get_int(0, 1, 4) > 3:
+		message('The door creaks loudly!', libtcod.light_grey)
+	door.symbol = '\''
+	door.block_sight = False
+	door.blocked = False
+	door.usable = None
+	update_fovmap()
 
 class Rect:
 	#a rectangle on the map.
@@ -236,6 +299,13 @@ class Rect:
 		self.y1 = y
 		self.x2 = x+w
 		self.y2 = y+h
+		
+	def __contains__(self, (x, y)):
+		#probably overkill but good training
+		if x > self.x1 and x < self.x2 and y > self.y1 and y < self.y2:
+			return True
+		else:
+			return False
 		
 	def center(self):
 		center_x = (self.x1 + self.x2) / 2
@@ -246,13 +316,23 @@ class Rect:
 		#returns true if this rectangle intersects another
 		return (self.x1 <= other.x2 and self.x2 >= other.x1 and self.y1 <= other.y2 and self.y2 >= other.y1)
 		
-def create_room(room):
+	def borders(self):
+		#for placing doors and custom walls!
+		border = []
+		for x in range(self.x1, self.x2+1):
+			for y in range(self.y1, self.y2+1):
+				if (x, y) not in self:
+					border.append((x,y))
+		return border
+		
+def create_room(room, doors = False):
 	global map
 	
 	for x in range(room.x1+1, room.x2):
 		for y in range(room.y1+1, room.y2):
 			map[x][y].blocked = False
 			map[x][y].block_sight = False
+			map[x][y].symbol = '.'
 
 def place_objects(room):
 	num_monsters = libtcod.random_get_int(0, 0, MAX_ROOM_MONSTERS)
@@ -289,24 +369,45 @@ def place_objects(room):
 				item = Object(x, y, "?", "scroll of confuse monster", libtcod.violet, item=Item(cast_confuse))
 			objects.append(item)
 			item.send_to_back()
-		
+
 def create_h_tunnel(x1, x2, y):
 	global map
 	#horizontal tunnel
+	
 	for x in range(min(x1, x2), max(x1, x2)+1):
 		map[x][y].blocked = False
 		map[x][y].block_sight = False
-			
+		map[x][y].symbol = '.'
+
 def create_v_tunnel(y1, y2, x):
 	global map
 	#vertical tunnel
 	for y in range(min(y1, y2), max(y1, y2)+1):
 		map[x][y].blocked = False
 		map[x][y].block_sight = False
+		map[x][y].symbol = '.'
+
+	
+def connect_rooms(room1, room2):
+	'''Take two rooms and dig a corridor between them.'''
+	(prev_x, prev_y) = room1.center()
+	(new_x, new_y) = room2.center()
+	
+	if libtcod.random_get_int(0,0,1) == 1:
+		#flip a coin: either create h tunnel first and v second
+		create_h_tunnel(prev_x, new_x, prev_y)
+		create_v_tunnel(prev_y, new_y, new_x)
+	else:
+		#or the other way around
+		create_v_tunnel(prev_y, new_y, prev_x)
+		create_h_tunnel(prev_x, new_x, new_y)
 
 def is_blocked(x, y):
 	#check if given tile is blocked
 	#test for impassable terrain
+	if x >= MAP_WIDTH or y >= MAP_HEIGHT:
+		return True
+		
 	if map[x][y].blocked:
 		return True
 		
@@ -320,14 +421,15 @@ def is_blocked(x, y):
 #map size and creation
 MAP_WIDTH = 80
 MAP_HEIGHT = 43
+rooms = []
 
 def make_map():
-	global map
+	global map, player
 	
 	#fill map with unblocked tiles
 	map = [[ Tile(True) for y in range(MAP_HEIGHT)] for x in range(MAP_WIDTH)]
 	
-	rooms = []
+	
 	num_rooms = 0
 	for r in range(MAX_ROOMS):
 		#randomize size
@@ -352,75 +454,120 @@ def make_map():
 			if DEBUG_ON == True:
 				room_no = Object(new_x, new_y, chr(65+num_rooms), 'room number', libtcod.white)
 				objects.insert(0, room_no)
+				room_no.send_to_back()
 			
 			if num_rooms == 0:
 				#the first room always contains the player
+				#player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
+				#objects = [player]
 				player.x = new_x
 				player.y = new_y
-				
+				player.pos = (new_x, new_y)
 				
 			else:
 				#connect all rooms after the first to the previous
+				connect_rooms(rooms[num_rooms-1], new_room)
 				
-				(prev_x, prev_y) = rooms[num_rooms-1].center()
-				
-				if libtcod.random_get_int(0,0,1) == 1:
-					#flip a coin: either create h tunnel first and v second
-					create_h_tunnel(prev_x, new_x, prev_y)
-					create_v_tunnel(prev_y, new_y, new_x)
-				else:
-					#or the other way around
-					create_v_tunnel(prev_y, new_y, prev_x)
-					create_h_tunnel(prev_x, new_x, new_y)
-					
-					
 			#append created room to rooms list
 			place_objects(new_room)
 			rooms.append(new_room)
 			num_rooms += 1
+	
+	#create doors
+	for room in rooms:
+		entrances = []
+		for (x, y) in room.borders():
+			if not map[x][y].blocked: entrances.append((x, y))
+		if len(entrances) < 5:
+		#to prevent having entire walls of doors where corridors and rooms touch
+			for (x, y) in entrances:
+				door = Usable(open_door)
+				map[x][y] = Tile(True, True, '+', door)
 
 #########
 # INPUT #
 #########
-	
+class Reticle:
+	#Class used as a messenger for targeting skills.
+	def __init__(self):
+		self.caller = None
+		self.x = 0
+		self.y = 0
+		self.pos = (0, 0)
+		self.size = 1
+		
+	def invoke(self, callback, size = 1, trange = None):
+		global player, cursor, game_state
+		self.cursor = Object(player.x, player.y, ' ', 'cursor')
+		self.caller = callback
+		self.size = size
+		self.trange = trange
+		game_state = 'select'
+		
+	def draw(self):
+		cornerx = self.cursor.x - (self.size / 2)
+		cornery = self.cursor.y - (self.size / 2)
+		
+		if self.trange > 0:
+			for tile in circle(player.x, player.y, self.trange):
+				libtcod.console_set_char_background(con, tile[0], tile[1], libtcod.darkest_red, flag=libtcod.BKGND_LIGHTEN)
+		
+		for tile in circle(self.cursor.x, self.cursor.y, self.size):
+			libtcod.console_set_char_background(con, tile[0], tile[1], libtcod.darkest_yellow, flag=libtcod.BKGND_ADD)
+			
+	def clear(self):
+		if self.trange > 0:
+			for tile in circle(player.x, player.y, self.trange):
+				libtcod.console_set_char_background(con, tile[0], tile[1], libtcod.black, flag=libtcod.BKGND_SET)
+		
+		for tile in circle(self.cursor.x, self.cursor.y, self.size):
+			libtcod.console_set_char_background(con, tile[0], tile[1], libtcod.black, flag=libtcod.BKGND_SET)
+			
+	def cancel(self):
+		self.clear()
+		self.caller = None
+		message("Targeting cancelled.", libtcod.purple)
+		
+	def resolve(self):
+		self.x = self.cursor.x
+		self.y = self.cursor.y
+		self.pos = (self.x, self.y)
+		self.aoe = circle(self.x, self.y, self.size)
+		self.caller()
+		resume_game()
+
+target = Reticle()
+
 def handle_keys():
 	global key #necessary only for mouse support
+	global game_state
 	
 	#key = libtcod.console_wait_for_keypress(True)
-	
-	if key.vk == libtcod.KEY_ENTER and key.lalt:
+	input = key.vk
+	if input == libtcod.KEY_ENTER and key.lalt:
 		#Alt+Enter: toggle fullscreen
 		libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
 	
-	if key.vk == libtcod.KEY_ESCAPE:
+	if game_state == 'select':
+		if input in DIRECTIONS:
+			dxy = DIRECTIONS[input]
+			target.cursor.move(dxy[0], dxy[1], True, target.trange)
+		elif chr(key.c) == 'x' or input == libtcod.KEY_ESCAPE:
+			target.cancel()
+			game_state = 'playing'
+			return 'didnt-take-turn'
+		elif input == libtcod.KEY_ENTER:
+			target.resolve()
+		
+	elif input == libtcod.KEY_ESCAPE:
 		return 'exit'
-
+	
 	elif game_state == 'playing':
-		if key.vk == libtcod.KEY_UP or key.vk == libtcod.KEY_KP8:
-			player_move_or_attack(0, -1)
-			
-		elif key.vk == libtcod.KEY_DOWN or key.vk == libtcod.KEY_KP2:
-			player_move_or_attack(0, 1)
-			
-		elif key.vk == libtcod.KEY_LEFT or key.vk == libtcod.KEY_KP4:
-			player_move_or_attack(-1, 0)
-			
-		elif key.vk == libtcod.KEY_RIGHT or key.vk == libtcod.KEY_KP6:
-			player_move_or_attack(1, 0)
-			
-		elif key.vk == libtcod.KEY_KP1:
-			player_move_or_attack(-1, 1)
-			
-		elif key.vk == libtcod.KEY_KP3:
-			player_move_or_attack(1, 1)
-			
-		elif key.vk == libtcod.KEY_KP7:
-			player_move_or_attack(-1, -1)
-			
-		elif key.vk == libtcod.KEY_KP9:
-			player_move_or_attack(1, -1)
-			
-		elif key.vk == libtcod.KEY_KP5: #wait
+		if input in DIRECTIONS:
+			dxy = DIRECTIONS[input]
+			player_move_or_attack(dxy[0], dxy[1])
+		
+		elif input == libtcod.KEY_KP5: #wait
 			fov_recompute = False
 			
 		elif chr(key.c) == 'g':
@@ -430,19 +577,42 @@ def handle_keys():
 					break
 			else:
 				message("Nothing to get.")
+				
+		elif chr(key.c) == 'w': #WHERE AM I
+			message(str(player.pos))
+			room_id = None
+			for index, room in enumerate(rooms):
+				if player.pos in room:
+					room_id = index+1
+					message("You are in room {0}.".format(room_id))
+					break
+			if room_id == None:
+				message("You are not anywhere in particular.")
+				
+		elif chr(key.c) == 'f': #FIREBALL
+			cast_fireball()
 			
-		else: #everything that doesn't take a turn
-			if chr(key.c) == "i":
+		else: #everything that doesn't take a turn but happens in player turn
+			if chr(key.c) == "i": #INVENTORY
 				chosen_item = inventory_menu("Backpack (press key to use)")
 				if chosen_item is not None:
 					chosen_item.use()
 					return
 					
-			if chr(key.c) == "?":
+			if chr(key.c) == 'x': #EXAMINE
+				act_examine()
+					
+			if chr(key.c) == "?": #HELP
 				message("[G]et items, use them from your [I]nventory and defeat monsters!")
-
+				
 			return "didnt-take-turn"
-		
+
+def resume_game():
+	global game_state
+	
+	if game_state != 'dead':
+		game_state = 'playing'
+			
 def player_move_or_attack(dx, dy):
 	global fov_recompute
 	
@@ -458,13 +628,16 @@ def player_move_or_attack(dx, dy):
 	if target is not None:
 		if target.fighter:
 			player.fighter.attack(target)
-
 		else:
+			#for theoretical nonfighter objects
 			message("You stumble into the {0}!".format(target.name))
 	else:
-		player.move(dx, dy)
+		if not map[x][y].usable:
+			player.move(dx, dy)
+		else:
+			map[x][y].usable.activate()
 		fov_recompute = True
-		
+
 def menu(header, options, width):
 	if len(options) > 26: raise ValueError("Cannot have a menu with more than 26 options.") #TODO: maybe later.
 	
@@ -514,6 +687,7 @@ def render_all():
 	global color_dark_ground, color_lit_ground
 	global fov_recompute
 	global game_msgs
+	
 
 	#draw all objects
 	
@@ -522,23 +696,24 @@ def render_all():
 		fov_recompute = False
 		libtcod.map_compute_fov(fov_map, player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO)
 	
-		#for now only supports two types of terrain: wall and notwall.
+		#for now only supports two types of terrain: wall and notwall. now also door!
 		for y in range(MAP_HEIGHT):
 			for x in range(MAP_WIDTH):
 				visible = libtcod.map_is_in_fov(fov_map, x, y)
 				wall = map[x][y].block_sight
+				symbol = map[x][y].symbol
 				if not visible:
 					if map[x][y].explored:
 						if wall:
-							libtcod.console_put_char_ex(con,x,y,"#", color_dark_wall, libtcod.black)
+							libtcod.console_put_char_ex(con,x,y,symbol, color_dark_wall, libtcod.black)
 						else:
-							libtcod.console_put_char_ex(con,x,y,".", color_dark_ground, libtcod.black)
+							libtcod.console_put_char_ex(con,x,y,symbol, color_dark_ground, libtcod.black)
 				else:
 					map[x][y].explored = True
 					if wall:
-						libtcod.console_put_char_ex(con,x,y,"#", color_lit_wall, libtcod.black)
+						libtcod.console_put_char_ex(con,x,y,symbol, color_lit_wall, libtcod.black)
 					else:
-						libtcod.console_put_char_ex(con,x,y,".", color_lit_ground, libtcod.black)
+						libtcod.console_put_char_ex(con,x,y,symbol, color_lit_ground, libtcod.black)
 	
 	#eventually i'm gonna need a better system of drawing priority (several lists?) but this'll do for now
 	for object in objects:
@@ -546,22 +721,41 @@ def render_all():
 			object.draw()
 	player.draw()
 	
+	if game_state == 'select':
+		target.draw()
+	
 	libtcod.console_blit(con,0,0,SCREEN_WIDTH,SCREEN_HEIGHT,0,0,0)
 	
 	#render GUI
 	libtcod.console_set_default_background(panel, libtcod.black)
 	libtcod.console_clear(panel)
 	y = 1
+	
 	for (line, color) in game_msgs:
 		libtcod.console_set_default_foreground(panel, color)
 		libtcod.console_print_ex(panel, MSG_X, y, libtcod.BKGND_NONE, libtcod.LEFT, line)
 		y += 1
+	
 	render_bar(1, 1, BAR_WIDTH, "HP", player.fighter.hp, player.fighter.max_hp, libtcod.light_red, libtcod.darker_red)
 	#render the mouseview hint
+	
 	libtcod.console_set_default_foreground(panel, libtcod.light_gray)
-	libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, get_names_under_mouse())
+	libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, get_names_under_mouse().capitalize())
+	if game_state == 'select':
+		cursorlist = get_names(target.cursor.x, target.cursor.y)
+		if len(cursorlist) > 0:
+			libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, cursorlist.capitalize())
+	
 	libtcod.console_print_ex(panel, 1, 3, libtcod.BKGND_NONE, libtcod.LEFT, "Turn {0}".format(turncount))
 	libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, PANEL_HEIGHT, 0, 0, PANEL_Y)
+
+def update_fovmap():
+	'''Call whenever a tile changes its block_sight status.'''
+	global fov_map
+	
+	for y in range(MAP_HEIGHT):
+		for x in range(MAP_WIDTH):
+			libtcod.map_set_properties(fov_map, x, y, not map[x][y].block_sight, not map[x][y].blocked)
 
 def render_bar(x, y, total_width, name, value, maximum, bar_color, back_color):
 	global panel
@@ -588,19 +782,32 @@ def message(new_msg, color = libtcod.white):
 			del game_msgs[0]
 		game_msgs.append((line, color))
 		
-def get_names_under_mouse():
-	global mouse
-	(x, y) = (mouse.cx, mouse.cy)
-	
+def get_names(x, y):
 	names = [obj.name for obj in objects
 		if obj.x == x and obj.y == y and libtcod.map_is_in_fov(fov_map, obj.x, obj.y)]
 	names = ', '.join(names)
 	
-	return names.capitalize()
+	return names
+		
+		
+def get_names_under_mouse():
+	global mouse
+	return get_names(mouse.cx, mouse.cy)
+	
 		
 ####################
 # SKILLS AND ITEMS #
 ####################
+
+def act_examine():
+	if game_state != 'select':
+		target.invoke(act_examine, 1)
+	else:
+		name = 'nothing'
+		for object in objects:
+			if object.pos == target.pos:
+				name = get_names(object.x, object.y)
+		message('Examined the {2} at {0}, {1}.'.format(target.x, target.y, name))
 
 def cast_heal():
 	if player.fighter.hp == player.fighter.max_hp:
@@ -611,26 +818,49 @@ def cast_heal():
 	player.fighter.heal(10)
 	
 def cast_lightning():
-	target = closest_monster(LIGHTNING_RANGE)
-	if target is None:
+	monster = closest_monster(LIGHTNING_RANGE)
+	if monster is None:
 		message("No enemy is close enough to strike.", libtcod.red)
-		return "cancelled"
+		return 'no-use'
 	else:
-		message("A lightning bolt strikes the {0} with a loud thunder for {1} damage!".format(target.name, LIGHTNING_DAMAGE))
-		target.fighter.take_damage(LIGHTNING_DAMAGE)
+		message("A lightning bolt strikes the {0} with a loud thunder for {1} damage!".format(monster.name, LIGHTNING_DAMAGE))
+		monster.fighter.take_damage(LIGHTNING_DAMAGE)
 		
 def cast_confuse():
 	#find closest enemy and confuse it
 	monster = closest_monster(CONFUSE_RANGE)
 	if monster is None:
 		message('No enemy within range to confuse.', libtcod.red)
-		return 'cancelled'
+		return 'no-use'
 	else:
 		old_ai = monster.ai
 		monster.ai = Confused(old_ai)
 		monster.ai.owner = monster
 		message("The {0}'s eyes unfocus and glaze over...".format(monster.name), libtcod.light_green)
 		
+def cast_fireball():
+	global objects, player, game_state
+	if game_state != 'select':
+		message("What to blow up?")
+		target.invoke(cast_fireball, FIREBALL_RADIUS, FIREBALL_RANGE)
+	else:
+		succ_hits = []
+		print repr(player.pos in target.aoe)
+		
+		for object in objects:
+			if object.fighter and object.pos in target.aoe:
+				succ_hits.append(object)
+		if len(succ_hits) == 0:
+			message("That would be a waste.")
+			return 'no-use'
+		else:
+			for victim in succ_hits:
+				if victim.known:
+					message("Your fireball strikes the {0} for {1} damage!!".format(victim.name, FIREBALL_DAMAGE))
+				else:
+					message("You hear a yelp!")
+				victim.fighter.take_damage(FIREBALL_DAMAGE)
+
 def closest_monster(max_range):
 	'''Finds the closest visible enemy up to a maximum range'''
 	closest_enemy = None
@@ -642,6 +872,22 @@ def closest_monster(max_range):
 				closest_enemy = object
 				closest_dist = dist
 	return closest_enemy
+
+def distance(x, y, x2, y2):
+	return sqrt((x - x2) ** 2 + (y - y2) ** 2)
+	
+def circle(x, y, radius):
+	'''Returns a list of coordinates within a circle of a certain radius from the center point.'''
+	cornerx = x - radius
+	cornery = y - radius
+	coords = []
+	
+	for dx in range(cornerx, cornerx + 2*radius):
+		for dy in range(cornery, cornery + 2*radius):
+			if distance(x, y, dx, dy) <= (radius - 1):
+				coords.append((dx, dy))
+		
+	return coords
 	
 ##################
 # INITIALIZATION #
@@ -653,21 +899,24 @@ libtcod.sys_set_fps(LIMIT_FPS)
 con = libtcod.console_new(SCREEN_WIDTH, SCREEN_HEIGHT)
 panel = libtcod.console_new(SCREEN_WIDTH, PANEL_HEIGHT)
 
+
 game_state = 'playing'
 player_action = None
 
-player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
-objects = [player]
+#player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
+
 inventory = [] #TODO: maybe eventually an inventory for every actor? bound to Fighter???
 game_msgs = []
-
+player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
+objects = [player]
 make_map()
+for object in objects: print object.name, object.x, object.y
+(player.x, player.y) = rooms[0].center()
+
+fov_recompute = True
 
 fov_map = libtcod.map_new(MAP_WIDTH, MAP_HEIGHT)
-for y in range(MAP_HEIGHT):
-	for x in range(MAP_WIDTH):
-		libtcod.map_set_properties(fov_map, x, y, not map[x][y].block_sight, not map[x][y].blocked)
-fov_recompute = True
+update_fovmap()
 
 # MOUSE SUPPORT
 mouse = libtcod.Mouse()
@@ -685,7 +934,10 @@ while not libtcod.console_is_window_closed():
 	#clear objects
 	for object in objects:
 		object.clear()
-	
+		
+	if game_state == 'select':
+		target.clear()
+		
 	#handle keys and exit if requested
 	player_action = handle_keys()
 	
@@ -698,4 +950,3 @@ while not libtcod.console_is_window_closed():
 			if object.ai:
 				object.ai.take_turn()
 		turncount += 1
-	
