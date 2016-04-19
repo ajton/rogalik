@@ -66,7 +66,6 @@ class Object:
 	def __init__(self, x, y, char='@', name='OBJECT', color=libtcod.red, blocks=False, fighter=None, ai=None, item=None, interact=None):
 		self.x = x
 		self.y = y
-		self.pos = (self.x, self.y)
 		self.char = char
 		self.name = name
 		self.color = color
@@ -94,10 +93,14 @@ class Object:
 			if not is_blocked(nx, ny) or ghost:
 				self.x = nx
 				self.y = ny
-				self.pos = (self.x, self.y)
 				return True
 		
 		return False
+		
+	def place(self, x, y):
+		#move without any checks
+		self.x = x
+		self.y = y
 
 	def distance_to(self, other):
 		dx = other.x - self.x
@@ -215,6 +218,13 @@ class Item:
 		else:
 			if self.use_function() != False:
 				inventory.remove(self.owner)
+				
+	def drop(self):
+		#add item to map at player's coords and remove from inventory
+		objects.append(self.owner)
+		inventory.remove(self.owner)
+		self.owner.place(player.x, player.y)
+		message("Dropped a {0}.".format(self.owner.name), libtcod.yellow)
 				
 class Interact:
 	#A subtype for implementing usable objects, such as doors or NPCs. If use_command is None, it activates when the player moves into it.
@@ -463,9 +473,7 @@ def make_map():
 				#the first room always contains the player
 				#player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
 				#objects = [player]
-				player.x = new_x
-				player.y = new_y
-				player.pos = (new_x, new_y)
+				player.place(new_x, new_y)
 				
 			else:
 				#connect all rooms after the first to the previous
@@ -495,7 +503,6 @@ def targeting(size=1, maxrange=None):
 	cursor = Object(player.x, player.y, ' ', 'cursor')
 	
 	while not libtcod.console_is_window_closed():
-		message('Targeting...')
 		draw_target(cursor, size, maxrange)
 		render_all()
 		libtcod.console_flush()
@@ -506,6 +513,7 @@ def targeting(size=1, maxrange=None):
 		if input in DIRECTIONS:
 			dxy = DIRECTIONS[input]
 			cursor.move(dxy[0], dxy[1], True, maxrange)
+			
 		elif input == libtcod.KEY_ESCAPE:
 			return None
 		elif input == libtcod.KEY_ENTER:
@@ -521,10 +529,11 @@ class Area:
 		self.size = size
 		self.caught = []
 		for object in objects:
-			if object.pos in circle(self.x, self.y, self.size):
+			if (object.x, object.y) in circle(self.x, self.y, self.size):
 				self.caught.append(object)
 
 def draw_target(cursor, size=1, maxrange=None):
+	global hint
 	#draw reticle of stated size
 	if maxrange > 0:
 		for tile in circle(player.x, player.y, maxrange):
@@ -532,6 +541,9 @@ def draw_target(cursor, size=1, maxrange=None):
 	
 	for tile in circle(cursor.x, cursor.y, size):
 		libtcod.console_set_char_background(con, tile[0], tile[1], libtcod.darkest_yellow, flag=libtcod.BKGND_ADD)
+		
+	hint = get_names(cursor.x, cursor.y)
+	
 			
 def clear_target(cursor, crange, size):
 	if crange > 0:
@@ -552,17 +564,6 @@ def handle_keys():
 	if input == libtcod.KEY_ENTER and key.lalt:
 		#Alt+Enter: toggle fullscreen
 		libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
-	
-	if game_state == 'select':
-		if input in DIRECTIONS:
-			dxy = DIRECTIONS[input]
-			target.cursor.move(dxy[0], dxy[1], True, target.trange)
-		elif chr(key.c) == 'x' or input == libtcod.KEY_ESCAPE:
-			target.cancel()
-			game_state = 'playing'
-			return 'didnt-take-turn'
-		elif input == libtcod.KEY_ENTER:
-			target.resolve()
 		
 	elif input == libtcod.KEY_ESCAPE:
 		return 'exit'
@@ -584,10 +585,10 @@ def handle_keys():
 				message("Nothing to get.")
 				
 		elif chr(key.c) == 'w': #WHERE AM I
-			message(str(player.pos))
+			message(str((player.x, player.y)))
 			room_id = None
 			for index, room in enumerate(rooms):
-				if player.pos in room:
+				if (player.x, player.y) in room:
 					room_id = index+1
 					message("You are in room {0}.".format(room_id))
 					break
@@ -666,6 +667,7 @@ def menu(header, options, width):
 	y = SCREEN_HEIGHT/2 - height/2
 	libtcod.console_blit(window, 0, 0, width, height, 0, x, y, 1.0, 0.7)
 	libtcod.console_flush()
+
 	key = libtcod.console_wait_for_keypress(True)
 	index = key.c - ord("a")
 	if index >= 0 and index < len(options):
@@ -688,14 +690,15 @@ def inventory_menu(header):
 # GUI #
 #######
 def render_all():
+	render_map()
+	render_gui()
+
+def render_map():
 	global fov_map, color_dark_wall, color_lit_wall
 	global color_dark_ground, color_lit_ground
 	global fov_recompute
-	global game_msgs
-	
 
-	#draw all objects
-	
+	#draw all objects	
 	if fov_recompute:
 		#recompute fov if needed
 		fov_recompute = False
@@ -727,8 +730,10 @@ def render_all():
 	player.draw()
 	
 	libtcod.console_blit(con,0,0,SCREEN_WIDTH,SCREEN_HEIGHT,0,0,0)
-	
+
+def render_gui():
 	#render GUI
+	global game_msgs, hint
 	libtcod.console_set_default_background(panel, libtcod.black)
 	libtcod.console_clear(panel)
 	y = 1
@@ -740,18 +745,19 @@ def render_all():
 	
 	render_bar(1, 1, BAR_WIDTH, "HP", player.fighter.hp, player.fighter.max_hp, libtcod.light_red, libtcod.darker_red)
 	#render the mouseview hint
-	
+	if hint == "":
+		hint = get_names_under_mouse().capitalize()
+		
 	libtcod.console_set_default_foreground(panel, libtcod.light_gray)
-	libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, get_names_under_mouse().capitalize())
-	if game_state == 'select':
-		cursorlist = get_names(target.cursor.x, target.cursor.y)
-		if len(cursorlist) > 0:
-			libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, cursorlist.capitalize())
+	libtcod.console_print_ex(panel, 1, 0, libtcod.BKGND_NONE, libtcod.LEFT, hint)
 	
+	#render turncount
 	libtcod.console_print_ex(panel, 1, 3, libtcod.BKGND_NONE, libtcod.LEFT, "Turn {0}".format(turncount))
 	libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, PANEL_HEIGHT, 0, 0, PANEL_Y)
 	
 def clear_all():
+	libtcod.console_set_default_background(panel, libtcod.black)
+	libtcod.console_clear(panel)
 	#clear objects
 	for object in objects:
 		object.clear()
@@ -913,6 +919,7 @@ player_action = None
 
 inventory = [] #TODO: maybe eventually an inventory for every actor? bound to Fighter???
 game_msgs = []
+hint = ""
 player = Object(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, '@', 'player', libtcod.white, True, fighter = Fighter(hp=30, defence=2, power=5, death_function=player_death))
 objects = [player]
 make_map()
@@ -934,7 +941,8 @@ while not libtcod.console_is_window_closed():
 	render_all()
 	
 	libtcod.console_flush()
-		
+	clear_all()
+	
 	#handle keys and exit if requested
 	player_action = handle_keys()
 	
